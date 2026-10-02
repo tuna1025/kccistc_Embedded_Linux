@@ -1,0 +1,25 @@
+# CMake / STM32CubeIDE build output
+/build/
+/Debug/
+cmake-build-*/
+
+# Compiler and linker artifacts
+*.o
+*.obj
+*.d
+*.su
+*.cyclo
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+
+# STM32Cube temporary files
+mx.scratch/
+*.bak
+*.tmp
+
+# OS metadata
+.DS_Store
+Thumbs.db
