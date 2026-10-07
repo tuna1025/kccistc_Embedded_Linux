@@ -2,17 +2,12 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
+  * @brief          : Direct UART Protocol (No DB, Buffer Direct Parse)
   ******************************************************************************
   * @attention
   *
   * Copyright (c) 2026 STMicroelectronics.
   * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -22,6 +17,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <string.h>
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -47,15 +43,16 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 uint8_t rx_data = 0;
-uint8_t rx_buffer[64];
+uint8_t rx_buffer[128];
 uint8_t rx_index = 0;
 
 typedef enum {
-    STATE_LOCKED = 0,    // 닫힘/잠금 상태 (LED ON)
-    STATE_OPENED         // 열림 상태 (LED OFF)
+    STATE_LOCKED = 0,
+    STATE_UNLOCKED
 } LockerState_t;
 
 LockerState_t current_state = STATE_LOCKED;
+volatile uint8_t cmd_flag = 0; // 0: 대기, 1: UNLOCK 실행, 2: LOCK 실행
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -71,8 +68,11 @@ void lcd_clear(void);
 void lcd_put_cur(int row, int col);
 void lcd_init(void);
 void lcd_send_string(char *str);
+
 void Locker_Lock(void);
-void Locker_Remote_Unlock(void);
+void Locker_Unlock(void);
+void Locker_Send_Status(void);
+void Process_Command(char *cmd_str);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -113,18 +113,16 @@ int main(void)
   MX_USART2_UART_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
-// 1바이트 수신 인터럽트 켜기 (USART1 = 블루투스 ZS-040)
-  HAL_UART_Receive_IT(&huart1, &rx_data, 1);
-
-  // 라즈베리파이에 부팅 알림 전송 (테스트용)
-  char *boot_msg = "[STM32_BT_READY]\n";
-  HAL_UART_Transmit(&huart1, (uint8_t*)boot_msg, strlen(boot_msg), 100);
-
+  HAL_Delay(100); // 전원 안정화 대기
   lcd_init();
-  Locker_Lock(); // 부팅 시 기본 잠금 상태로 시작
+  Locker_Lock(); // 기본 잠금 상태 시작
 
-  // 블루투스(USART1)로부터 1바이트 수신 대기 시작
+  // 블루투스(USART1) 인터럽트 1바이트 수신 대기
   HAL_UART_Receive_IT(&huart1, &rx_data, 1);
+
+  // 부팅 알림 전송
+  char *boot_msg = "[LDW_STM]STATUS:LOCKED@1\n";
+  HAL_UART_Transmit(&huart1, (uint8_t*)boot_msg, strlen(boot_msg), 100);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -134,6 +132,18 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    if (cmd_flag == 1) // UNLOCK 처리 (인터럽트 밖에서 안전하게 LCD 구동)
+    {
+        cmd_flag = 0;
+        Locker_Unlock();
+        Locker_Send_Status();
+    }
+    else if (cmd_flag == 2) // LOCK 처리
+    {
+        cmd_flag = 0;
+        Locker_Lock();
+        Locker_Send_Status();
+    }
   }
   /* USER CODE END 3 */
 }
@@ -147,14 +157,9 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Configure the main internal regulator output voltage
-  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
@@ -169,8 +174,6 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
@@ -191,14 +194,6 @@ void SystemClock_Config(void)
   */
 static void MX_I2C1_Init(void)
 {
-
-  /* USER CODE BEGIN I2C1_Init 0 */
-
-  /* USER CODE END I2C1_Init 0 */
-
-  /* USER CODE BEGIN I2C1_Init 1 */
-
-  /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
   hi2c1.Init.ClockSpeed = 100000;
   hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
@@ -212,10 +207,6 @@ static void MX_I2C1_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN I2C1_Init 2 */
-
-  /* USER CODE END I2C1_Init 2 */
-
 }
 
 /**
@@ -225,14 +216,6 @@ static void MX_I2C1_Init(void)
   */
 static void MX_USART1_UART_Init(void)
 {
-
-  /* USER CODE BEGIN USART1_Init 0 */
-
-  /* USER CODE END USART1_Init 0 */
-
-  /* USER CODE BEGIN USART1_Init 1 */
-
-  /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
   huart1.Init.BaudRate = 9600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
@@ -245,10 +228,6 @@ static void MX_USART1_UART_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART1_Init 2 */
-
-  /* USER CODE END USART1_Init 2 */
-
 }
 
 /**
@@ -258,14 +237,6 @@ static void MX_USART1_UART_Init(void)
   */
 static void MX_USART2_UART_Init(void)
 {
-
-  /* USER CODE BEGIN USART2_Init 0 */
-
-  /* USER CODE END USART2_Init 0 */
-
-  /* USER CODE BEGIN USART2_Init 1 */
-
-  /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
   huart2.Init.BaudRate = 115200;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
@@ -278,10 +249,6 @@ static void MX_USART2_UART_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART2_Init 2 */
-
-  /* USER CODE END USART2_Init 2 */
-
 }
 
 /**
@@ -292,40 +259,28 @@ static void MX_USART2_UART_Init(void)
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
 
-  /* USER CODE END MX_GPIO_Init_1 */
-
-  /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : LD2_Pin */
   GPIO_InitStruct.Pin = LD2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
-
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-
-  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
 
-// 오버런 및 프레이밍 에러 발생 시 자동 복구 함수
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1)
@@ -336,8 +291,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     }
 }
 
-
-// LCD 저수준 제어 함수
+// LCD 드라이버
 void lcd_send_cmd(char cmd)
 {
     char data_u, data_l;
@@ -382,25 +336,40 @@ void lcd_put_cur(int row, int col)
 
 void lcd_init(void)
 {
-    HAL_Delay(50);
-    lcd_send_cmd(0x30);
-    HAL_Delay(5);
-    lcd_send_cmd(0x30);
-    HAL_Delay(1);
+    // 1. LCD 컨트롤러 전원 안정화 대기
+    HAL_Delay(100);
+
+    // 2. HD44780 4-bit 모드 진입 공식 시퀀스
     lcd_send_cmd(0x30);
     HAL_Delay(10);
+    lcd_send_cmd(0x30);
+    HAL_Delay(2);
+    lcd_send_cmd(0x30);
+    HAL_Delay(2);
+
+    // 3. 4-bit 모드 전환
     lcd_send_cmd(0x20);
     HAL_Delay(10);
 
+    // 4. 기능 설정 (2줄, 5x8 폰트)
     lcd_send_cmd(0x28);
-    HAL_Delay(1);
+    HAL_Delay(5);
+
+    // 5. 디스플레이 OFF
     lcd_send_cmd(0x08);
-    HAL_Delay(1);
+    HAL_Delay(5);
+
+    // 6. 화면 클리어
     lcd_send_cmd(0x01);
-    HAL_Delay(2);
+    HAL_Delay(5);
+
+    // 7. 엔트리 모드 (커서 오른쪽 이동)
     lcd_send_cmd(0x06);
-    HAL_Delay(1);
+    HAL_Delay(5);
+
+    // 8. 디스플레이 ON, 커서 OFF
     lcd_send_cmd(0x0C);
+    HAL_Delay(5);
 }
 
 void lcd_send_string(char *str)
@@ -408,112 +377,99 @@ void lcd_send_string(char *str)
     while (*str) lcd_send_data(*str++);
 }
 
-// 1번: 닫힘 상태
+// 1. 잠금 (LOCK)
 void Locker_Lock(void)
 {
     current_state = STATE_LOCKED;
-    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
-
+    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET); // LED ON
     lcd_clear();
     lcd_put_cur(0, 0);
-    lcd_send_string("LOCKER #1       "); 
+    lcd_send_string("LOCKER #1       ");
     lcd_put_cur(1, 0);
     lcd_send_string("STATUS: LOCKED  ");
 }
 
-// 2번: 원격 열림 상태
-void Locker_Remote_Unlock(void)
+// 2. 잠금 해제 (UNLOCK)
+void Locker_Unlock(void)
 {
-    current_state = STATE_OPENED;
-    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
-
+    current_state = STATE_UNLOCKED;
+    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET); // LED OFF
     lcd_clear();
     lcd_put_cur(0, 0);
-    lcd_send_string("REMOTE UNLOCK   ");
+    lcd_send_string("LOCKER #1       ");
     lcd_put_cur(1, 0);
-    lcd_send_string("DOOR OPENED     ");
+    lcd_send_string("STATE: UNLOCKED ");
 }
 
+// 3. 상태 회신 함수
+void Locker_Send_Status(void)
+{
+    char resp[64];
+    if (current_state == STATE_LOCKED)
+    {
+        snprintf(resp, sizeof(resp), "[LDW_STM]STATUS:LOCKED@1\n");
+    }
+    else
+    {
+        snprintf(resp, sizeof(resp), "[LDW_STM]STATUS:UNLOCKED@1\n");
+    }
+    HAL_UART_Transmit(&huart1, (uint8_t*)resp, strlen(resp), 100);
+}
+
+// 4. 버퍼 파싱 및 명령 플래그 설정
+void Process_Command(char *cmd_str)
+{
+    // 이전 버퍼 찌꺼기 영향 차단 및 명확한 명령어 매칭
+    if (strstr(cmd_str, "UNLOCK") != NULL)
+    {
+        cmd_flag = 1; // while 루프에 언락 요청 전달
+    }
+    else if (strstr(cmd_str, "LOCK") != NULL && strstr(cmd_str, "UNLOCK") == NULL)
+    {
+        cmd_flag = 2; // while 루프에 락 요청 전달 (UNLOCK과 중복 방지)
+    }
+    else if (strstr(cmd_str, "STATUS?") != NULL)
+    {
+        Locker_Send_Status();
+    }
+}
+
+// UART 인터럽트 수신 콜백
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1)
     {
-        // 1. 단일 문자 명령 즉시 처리 (스마트폰 앱 테스트용: O/1=열림, L/0/C=닫힘)
-        if (rx_data == 'O' || rx_data == 'o' || rx_data == '1')
-        {
-            Locker_Remote_Unlock();
-        }
-        else if (rx_data == 'L' || rx_data == 'l' || rx_data == 'C' || rx_data == 'c' || rx_data == '0')
-        {
-            Locker_Lock();
-        }
-
-        // 2. 개행 단위 문자열 명령 처리 (라즈베리파이 통신용: CMD_UNLOCK 등)
+        // 개행 단위 문자열 파싱
         if (rx_data == '\n' || rx_data == '\r')
         {
             if (rx_index > 0)
             {
                 rx_buffer[rx_index] = '\0';
-
-                if (strstr((char*)rx_buffer, "CMD_UNLOCK") != NULL)
-                {
-                    Locker_Remote_Unlock(); // LCD에 REMOTE UNLOCK 출력 및 도어 개방
-
-                    // 응답 회신
-                    char *ack = "[ACK_DOOR_OPENED]\n";
-                    HAL_UART_Transmit(&huart1, (uint8_t*)ack, strlen(ack), 100);
-                }
-                else if (strstr((char*)rx_buffer, "CMD_LOCK") != NULL)
-                {
-                    Locker_Lock(); // LCD에 LOCKER #1: LOCKED 복귀
-
-                    char *ack = "[ACK_DOOR_LOCKED]\n";
-                    HAL_UART_Transmit(&huart1, (uint8_t*)ack, strlen(ack), 100);
-                }
+                Process_Command((char*)rx_buffer);
+                
+                // === [이 위치에 넣어주시면 됩니다] ===
+                memset(rx_buffer, 0, sizeof(rx_buffer));
                 rx_index = 0;
             }
         }
         else
         {
-            if (rx_index < 63)
+            if (rx_index < 127)
             {
                 rx_buffer[rx_index++] = rx_data;
             }
         }
 
-        // 다음 1바이트 수신 대기
+        // 수신 대기 유지
         HAL_UART_Receive_IT(&huart1, &rx_data, 1);
     }
 }
 /* USER CODE END 4 */
 
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
-  /* USER CODE END Error_Handler_Debug */
 }
-#ifdef USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
-void assert_failed(uint8_t *file, uint32_t line)
-{
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
-}
-#endif /* USE_FULL_ASSERT */
