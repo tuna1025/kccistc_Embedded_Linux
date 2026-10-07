@@ -280,12 +280,29 @@ static void sendStatus(void)
   }
 }
 
-static void processHostCommand(const char *command)
+static void replyStatus(const char *target)
+{
+  if (target == NULL) return;
+  for (uint8_t locker = 0; locker < LOCKER_COUNT; locker++)
+  {
+    char payload[64];
+    (void)snprintf(payload, sizeof(payload), "STATUS@%u@%s@%s",
+                   (unsigned)locker + 1,
+                   door_open[locker] ? "OPEN" : "CLOSED",
+                   lockServoIsLocked(locker) ? "LOCKED" : "UNLOCKED");
+    sendRouted(target, payload);
+  }
+}
+
+static void processHostCommand(const char *command, const char *reply_to)
 {
   unsigned number;
   char extra;
   if (strcmp(command, "STATUS?") == 0)
+  {
     sendStatus();
+    replyStatus(reply_to);
+  }
   else if (strcmp(command, "BUZZER") == 0)
     piezoError();
   else if (sscanf(command, "UNLOCK@%u%c", &number, &extra) == 1 &&
@@ -318,9 +335,9 @@ static void processNetworkLine(char *line)
     return;
   }
   if (strcmp(line + 1, IOT_ADMIN_ID) == 0)
-    processHostCommand(closing + 1);
+    processHostCommand(closing + 1, line + 1);
 #else
-  processHostCommand(line);
+  processHostCommand(line, NULL);
 #endif
 }
 
@@ -378,7 +395,7 @@ static void hostUpdate(void)
       if (usb_length > 0)
       {
         usb_line[usb_length] = '\0';
-        processHostCommand(usb_line);
+        processHostCommand(usb_line, NULL);
         usb_length = 0;
       }
     }
