@@ -14,8 +14,7 @@
 /* 기존 sql_client_sensor.c를 실행할 때 쓰는 ID로 변경 */
 /* #define IOT_DB_ID "KSH_SQL" */
 
-/* 실제 비밀번호나 센서 출력 극성이 다를 때 이곳에서 덮어쓴다. */
-/* #define LOCKER_1_PIN "YOUR_ACCESS_PIN" */
+/* 센서 출력 극성이 다를 때 이곳에서 덮어쓴다. 비밀번호는 라즈베리파이 DB에서 관리한다. */
 /* #define DOOR_CLOSED_LEVEL GPIO_PIN_RESET */
 
 #endif
