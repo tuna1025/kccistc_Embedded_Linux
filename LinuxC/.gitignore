@@ -26,3 +26,22 @@ Thumbs.db
 
 # Private device settings (Wi-Fi credentials and real access PINs)
 /MyApp/ap/project_local.h
+
+# STM32 VS Code 확장 자동 생성 설정 및 락 파일
+.settings/
+*.store.json
+
+# CMake 및 임베디드 빌드 출력 폴더 (용량 주범)
+build/
+bin/
+obj/
+
+# Clangd 인덱스 캐시 폴더
+.clangd/
+
+# VS Code 로컬 개인 설정
+.vscode/*
+!.vscode/c_cpp_properties.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
