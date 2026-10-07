@@ -42,12 +42,8 @@ uint16_t TTP229_ReadKeys(void)
   uint16_t keys = 0;
   uint8_t bit;
 
-  /* SDO가 HIGH이면 새 키 데이터가 준비되지 않은 상태이다. */
-  if (HAL_GPIO_ReadPin(TTP229_SDO_PORT, TTP229_SDO_PIN) == GPIO_PIN_SET)
-  {
-    return 0;
-  }
-
+  /* TTP229은 DV 신호를 기다리지 않고 SCL 16클럭으로 상시 폴링할 수 있다.
+   * 메인 루프가 DV의 짧은 LOW 구간을 놓칠 수 있으므로 SDO 상태로 건너뛰지 않는다. */
   for (bit = 0; bit < 16; bit++)
   {
     /* SCL을 LOW로 내린 뒤 현재 키 데이터 비트를 읽는다. */

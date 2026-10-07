@@ -1,25 +1,12 @@
-# CMake / STM32CubeIDE build output
-/build/
-/Debug/
-cmake-build-*/
+# Generated build products from either STM32 project
+**/build/
+**/Debug/
+**/cmake-build-*/
+**/mx.scratch/
 
-# Compiler and linker artifacts
-*.o
-*.obj
-*.d
-*.su
-*.cyclo
-*.elf
-*.bin
-*.hex
-*.map
-*.list
-
-# STM32Cube temporary files
-mx.scratch/
-*.bak
-*.tmp
+# Local device credentials
+**/MyApp/ap/project_local.h
 
 # OS metadata
-.DS_Store
 Thumbs.db
+.DS_Store
