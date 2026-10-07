@@ -36,6 +36,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+
 I2C_HandleTypeDef hi2c1;
 
 UART_HandleTypeDef huart1;
@@ -45,18 +47,17 @@ UART_HandleTypeDef huart2;
 uint8_t rx_data = 0;
 uint8_t rx_buffer[128];
 uint8_t rx_index = 0;
-
-typedef enum {
-    STATE_LOCKED = 0,
-    STATE_UNLOCKED
-} LockerState_t;
-
-LockerState_t current_state = STATE_LOCKED;
-volatile uint8_t cmd_flag = 0; // 0: 대기, 1: UNLOCK 실행, 2: LOCK 실행
+char status_line[2][64];
+volatile uint8_t status_pending[2] = {0, 0};
+char door_state[2][8] = {"?", "?"};
+char lock_state[2][10] = {"?", "?"};
+uint8_t selected_box = 0;
+uint8_t selected_action = 0; // 0: STATUS, 1: UNLOCK, 2: LOCK
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
+static void MX_ADC1_Init(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
@@ -69,10 +70,9 @@ void lcd_put_cur(int row, int col);
 void lcd_init(void);
 void lcd_send_string(char *str);
 
-void Locker_Lock(void);
-void Locker_Unlock(void);
-void Locker_Send_Status(void);
 void Process_Command(char *cmd_str);
+void Display_Locker_Status(uint8_t box);
+void Joystick_Update(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -109,19 +109,21 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_ADC1_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   HAL_Delay(100); // 전원 안정화 대기
   lcd_init();
-  Locker_Lock(); // 기본 잠금 상태 시작
+  lcd_clear();
+  Display_Locker_Status(selected_box);
 
   // 블루투스(USART1) 인터럽트 1바이트 수신 대기
   HAL_UART_Receive_IT(&huart1, &rx_data, 1);
 
   // 부팅 알림 전송
-  char *boot_msg = "[LDW_STM]STATUS:LOCKED@1\n";
+  char *boot_msg = "[ADMIN_READY]\n";
   HAL_UART_Transmit(&huart1, (uint8_t*)boot_msg, strlen(boot_msg), 100);
   /* USER CODE END 2 */
 
@@ -132,18 +134,38 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    if (cmd_flag == 1) // UNLOCK 처리 (인터럽트 밖에서 안전하게 LCD 구동)
+    for (uint8_t box = 0; box < 2; box++)
     {
-        cmd_flag = 0;
-        Locker_Unlock();
-        Locker_Send_Status();
+        char received[64];
+        uint8_t ready = 0;
+
+        __disable_irq();
+        if (status_pending[box])
+        {
+            strcpy(received, status_line[box]);
+            status_pending[box] = 0;
+            ready = 1;
+        }
+        __enable_irq();
+
+        if (ready)
+        {
+            unsigned number;
+            char door[8];
+            char lock[10];
+            if (sscanf(received, "STATUS@%u@%7[^@]@%9s",
+                       &number, door, lock) == 3 && number == (unsigned)box + 1 &&
+                (strcmp(door, "OPEN") == 0 || strcmp(door, "CLOSED") == 0) &&
+                (strcmp(lock, "LOCKED") == 0 || strcmp(lock, "UNLOCKED") == 0))
+            {
+                strcpy(door_state[box], door);
+                strcpy(lock_state[box], lock);
+                Display_Locker_Status(box);
+            }
+        }
     }
-    else if (cmd_flag == 2) // LOCK 처리
-    {
-        cmd_flag = 0;
-        Locker_Lock();
-        Locker_Send_Status();
-    }
+    Joystick_Update();
+    HAL_Delay(40);
   }
   /* USER CODE END 3 */
 }
@@ -185,6 +207,35 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/** ADC1 scans joystick X (PA0) and Y (PA1) once per update. */
+static void MX_ADC1_Init(void)
+{
+  ADC_ChannelConfTypeDef channel = {0};
+
+  __HAL_RCC_ADC1_CLK_ENABLE();
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.ScanConvMode = ENABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 2;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK) Error_Handler();
+
+  channel.Channel = ADC_CHANNEL_0;
+  channel.Rank = 1;
+  channel.SamplingTime = ADC_SAMPLETIME_84CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &channel) != HAL_OK) Error_Handler();
+  channel.Channel = ADC_CHANNEL_1;
+  channel.Rank = 2;
+  if (HAL_ADC_ConfigChannel(&hadc1, &channel) != HAL_OK) Error_Handler();
 }
 
 /**
@@ -277,6 +328,16 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 }
 
 /* USER CODE BEGIN 4 */
@@ -377,60 +438,108 @@ void lcd_send_string(char *str)
     while (*str) lcd_send_data(*str++);
 }
 
-// 1. 잠금 (LOCK)
-void Locker_Lock(void)
+// 선택한 보관함 상태와 실행할 명령을 LCD 두 줄에 표시한다.
+void Display_Locker_Status(uint8_t box)
 {
-    current_state = STATE_LOCKED;
-    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET); // LED ON
-    lcd_clear();
+    if (box != selected_box) return;
+    char row[17];
+    char action_row[17];
+    const char *door = strcmp(door_state[box], "CLOSED") == 0 ? "CLOSE" : door_state[box];
+    const char *lock = strcmp(lock_state[box], "UNLOCKED") == 0 ? "UNLOCK" :
+                       strcmp(lock_state[box], "LOCKED") == 0 ? "LOCK" : lock_state[box];
+    const char *action = selected_action == 0 ? ">STATUS CLICK" :
+                         selected_action == 1 ? ">UNLOCK HOLD1.2S" : ">LOCK HOLD1.2S";
+    snprintf(row, sizeof(row), "%c:%-5.5s %-8.8s", (char)('1' + box), door, lock);
+    snprintf(action_row, sizeof(action_row), "%-16.16s", action);
     lcd_put_cur(0, 0);
-    lcd_send_string("LOCKER #1       ");
+    lcd_send_string(row);
     lcd_put_cur(1, 0);
-    lcd_send_string("STATUS: LOCKED  ");
+    lcd_send_string(action_row);
 }
 
-// 2. 잠금 해제 (UNLOCK)
-void Locker_Unlock(void)
+static uint8_t Joystick_Read(uint16_t *x, uint16_t *y)
 {
-    current_state = STATE_UNLOCKED;
-    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET); // LED OFF
-    lcd_clear();
-    lcd_put_cur(0, 0);
-    lcd_send_string("LOCKER #1       ");
-    lcd_put_cur(1, 0);
-    lcd_send_string("STATE: UNLOCKED ");
-}
-
-// 3. 상태 회신 함수
-void Locker_Send_Status(void)
-{
-    char resp[64];
-    if (current_state == STATE_LOCKED)
-    {
-        snprintf(resp, sizeof(resp), "[LDW_STM]STATUS:LOCKED@1\n");
+    if (HAL_ADC_Start(&hadc1) != HAL_OK) return 0;
+    if (HAL_ADC_PollForConversion(&hadc1, 10) != HAL_OK) {
+        HAL_ADC_Stop(&hadc1);
+        return 0;
     }
+    *x = (uint16_t)HAL_ADC_GetValue(&hadc1);
+    if (HAL_ADC_PollForConversion(&hadc1, 10) != HAL_OK) {
+        HAL_ADC_Stop(&hadc1);
+        return 0;
+    }
+    *y = (uint16_t)HAL_ADC_GetValue(&hadc1);
+    HAL_ADC_Stop(&hadc1);
+    return 1;
+}
+
+static void Joystick_SendCommand(void)
+{
+    char command[24];
+    if (selected_action == 0)
+        snprintf(command, sizeof(command), "STATUS?\n");
     else
-    {
-        snprintf(resp, sizeof(resp), "[LDW_STM]STATUS:UNLOCKED@1\n");
-    }
-    HAL_UART_Transmit(&huart1, (uint8_t*)resp, strlen(resp), 100);
+        snprintf(command, sizeof(command), "%s@%u\n",
+                 selected_action == 1 ? "UNLOCK" : "LOCK",
+                 (unsigned)selected_box + 1);
+    HAL_UART_Transmit(&huart1, (uint8_t *)command,
+                      (uint16_t)strlen(command), 100);
 }
 
-// 4. 버퍼 파싱 및 명령 플래그 설정
+void Joystick_Update(void)
+{
+    static uint8_t y_centered = 1;
+    static uint8_t was_pressed = 0;
+    static uint32_t pressed_at = 0;
+    uint16_t x, y;
+    uint32_t now = HAL_GetTick();
+
+    if (Joystick_Read(&x, &y)) {
+        uint8_t new_box = selected_box;
+        if (x < 900) new_box = 0;
+        else if (x > 3200) new_box = 1;
+        if (new_box != selected_box) {
+            selected_box = new_box;
+            Display_Locker_Status(selected_box);
+        }
+
+        if (y > 1600 && y < 2500) y_centered = 1;
+        else if (y_centered && y < 900) {
+            selected_action = (uint8_t)((selected_action + 1) % 3);
+            y_centered = 0;
+            Display_Locker_Status(selected_box);
+        }
+        else if (y_centered && y > 3200) {
+            selected_action = (uint8_t)((selected_action + 2) % 3);
+            y_centered = 0;
+            Display_Locker_Status(selected_box);
+        }
+    }
+
+    uint8_t pressed = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_0) == GPIO_PIN_RESET;
+    if (pressed && !was_pressed) {
+        was_pressed = 1;
+        pressed_at = now;
+    }
+    else if (!pressed && was_pressed) {
+        was_pressed = 0;
+        uint32_t held = now - pressed_at;
+        if (held >= 80 && (selected_action == 0 || held >= 1200))
+            Joystick_SendCommand();
+    }
+}
+
+// 서버가 보낸 실제 보관함 상태만 받아 둔다. LCD 갱신은 메인 루프에서 한다.
 void Process_Command(char *cmd_str)
 {
-    // 이전 버퍼 찌꺼기 영향 차단 및 명확한 명령어 매칭
-    if (strstr(cmd_str, "UNLOCK") != NULL)
+    if (strncmp(cmd_str, "STATUS@", 7) == 0 &&
+        (cmd_str[7] == '1' || cmd_str[7] == '2') && cmd_str[8] == '@')
     {
-        cmd_flag = 1; // while 루프에 언락 요청 전달
-    }
-    else if (strstr(cmd_str, "LOCK") != NULL && strstr(cmd_str, "UNLOCK") == NULL)
-    {
-        cmd_flag = 2; // while 루프에 락 요청 전달 (UNLOCK과 중복 방지)
-    }
-    else if (strstr(cmd_str, "STATUS?") != NULL)
-    {
-        Locker_Send_Status();
+        uint8_t box = (uint8_t)(cmd_str[7] - '1');
+        strncpy(status_line[box], cmd_str, sizeof(status_line[box]) - 1);
+        status_line[box][sizeof(status_line[box]) - 1] = '\0';
+        status_pending[box] = 1;
     }
 }
 
@@ -447,8 +556,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
                 rx_buffer[rx_index] = '\0';
                 Process_Command((char*)rx_buffer);
                 
-                // === [이 위치에 넣어주시면 됩니다] ===
-                memset(rx_buffer, 0, sizeof(rx_buffer));
                 rx_index = 0;
             }
         }
