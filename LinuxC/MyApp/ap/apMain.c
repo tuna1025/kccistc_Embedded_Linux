@@ -30,6 +30,8 @@ static uint16_t previous_keys;
 static bool door_open[LOCKER_COUNT];
 static bool door_raw[LOCKER_COUNT];
 static uint32_t door_change_at[LOCKER_COUNT];
+static bool capture_armed[LOCKER_COUNT];
+static bool opened_after_unlock[LOCKER_COUNT];
 static bool lock_pending[LOCKER_COUNT];
 static uint32_t close_started_at[LOCKER_COUNT];
 static uint8_t selected_locker;
@@ -127,6 +129,8 @@ static void unlockLocker(uint8_t locker, const char *reason)
 {
   char event[32];
   lock_pending[locker] = false;
+  capture_armed[locker] = true;
+  opened_after_unlock[locker] = door_open[locker];
   lockServoUnlock(locker);
   piezoUnlock();
   (void)snprintf(event, sizeof(event), "UNLOCKED:%s", reason);
@@ -143,9 +147,23 @@ static void lockLocker(uint8_t locker)
       doorSensorIsOpen(locker) ||
       lockServoIsLocked(locker)) return;
   lockServoLock(locker);
+  capture_armed[locker] = false;
+  opened_after_unlock[locker] = false;
   piezoLock();
   sendEvent(locker, "LOCKED");
   if (selected_locker == locker) clearEntry();
+}
+
+static void requestCapture(uint8_t locker, const char *phase)
+{
+  char message[40];
+  (void)snprintf(message, sizeof(message), "CAPTURE:%u:%s\r\n",
+                 (unsigned)locker + 1, phase);
+  hostSend(message);
+  char payload[24];
+  (void)snprintf(payload, sizeof(payload), "CAPTURE@%u",
+                 (unsigned)locker + 1);
+  sendRouted(IOT_CAPTURE_TARGET_ID, payload);
 }
 
 static void authFailure(const char *message)
@@ -283,6 +301,11 @@ static void doorUpdate(void)
       if (raw)
       {
         lock_pending[locker] = false;
+        if (capture_armed[locker] && !opened_after_unlock[locker])
+        {
+          opened_after_unlock[locker] = true;
+          requestCapture(locker, "OPEN");
+        }
         sendEvent(locker, "DOOR:OPEN");
       }
       else
@@ -296,15 +319,12 @@ static void doorUpdate(void)
         now - close_started_at[locker] >= DOOR_CLOSE_GRACE_MS)
     {
       lock_pending[locker] = false;
+      bool should_capture = capture_armed[locker] && opened_after_unlock[locker];
+      capture_armed[locker] = false;
+      opened_after_unlock[locker] = false;
       lockLocker(locker);
-      char message[32];
-      (void)snprintf(message, sizeof(message), "CAPTURE:%u\r\n",
-                     (unsigned)locker + 1);
-      hostSend(message);
-      char payload[24];
-      (void)snprintf(payload, sizeof(payload), "CAPTURE@%u",
-                     (unsigned)locker + 1);
-      sendRouted(IOT_CAPTURE_TARGET_ID, payload);
+      if (!should_capture) continue;
+      requestCapture(locker, "CLOSED");
     }
   }
 }
@@ -338,7 +358,6 @@ static void processHostCommand(const char *command, const char *reply_to)
   char extra;
   if (strcmp(command, "STATUS?") == 0)
   {
-    sendStatus();
     replyStatus(reply_to);
   }
   else if (strcmp(command, "BUZZER") == 0)
@@ -461,9 +480,12 @@ void apInit(void)
   for (uint8_t locker = 0; locker < LOCKER_COUNT; locker++)
   {
     door_open[locker] = door_raw[locker] = doorSensorIsOpen(locker);
+    capture_armed[locker] = false;
+    opened_after_unlock[locker] = false;
     door_change_at[locker] = HAL_GetTick();
   }
   clearEntry();
+  hostSend("FW:CAPTURE_AFTER_UNLOCK_V3\r\n");
   hostSend("SYSTEM:READY\r\n");
   sendStatus();
 }
