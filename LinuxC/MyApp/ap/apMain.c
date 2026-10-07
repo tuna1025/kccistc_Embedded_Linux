@@ -17,8 +17,8 @@
 #define PASSWORD_MAX_LENGTH 8
 #define DOOR_DEBOUNCE_MS 50
 #define DOOR_CLOSE_GRACE_MS 1000
+#define AUTH_TIMEOUT_MS 10000
 
-static const char *const locker_pin[2] = {LOCKER_1_PIN, LOCKER_2_PIN};
 static const char key_map[16] = {
   '1', '2', '3', 'A',
   '4', '5', '6', 'B',
@@ -32,9 +32,13 @@ static bool door_raw[LOCKER_COUNT];
 static uint32_t door_change_at[LOCKER_COUNT];
 static bool lock_pending[LOCKER_COUNT];
 static uint32_t close_started_at[LOCKER_COUNT];
-static uint8_t selected_locker = LOCKER_COUNT;
+static uint8_t selected_locker;
 static char entered_password[PASSWORD_MAX_LENGTH + 1];
 static uint8_t entered_length;
+static bool auth_pending;
+static uint8_t auth_locker;
+static unsigned auth_request_id;
+static uint32_t auth_started_at;
 static char usb_line[64];
 static uint8_t usb_length;
 static bool network_seen;
@@ -52,16 +56,17 @@ static void hostSend(const char *message)
                           (uint16_t)strlen(message), 100);
 }
 
-static void sendRouted(const char *target, const char *payload)
+static bool sendRouted(const char *target, const char *payload)
 {
 #if IOT_LAB_SERVER
-  if (!network_seen) return;
+  if (!network_seen) return false;
   char packet[96];
   int length = snprintf(packet, sizeof(packet), "[%s]%s\r\n", target, payload);
-  if (length > 0 && length < (int)sizeof(packet)) (void)esp01Send(packet);
+  return length > 0 && length < (int)sizeof(packet) && esp01Send(packet);
 #else
   (void)target;
   (void)payload;
+  return false;
 #endif
 }
 
@@ -103,13 +108,6 @@ static void lcdShowEntry(void)
 {
   char text[17];
   lcd1602Clear();
-  if (selected_locker >= LOCKER_COUNT)
-  {
-    lcd1602Print("SELECT LOCKER");
-    lcd1602Cursor(1, 0);
-    lcd1602Print(LOCKER_COUNT == 1 ? "PRESS 1" : "PRESS 1 OR 2");
-    return;
-  }
   (void)snprintf(text, sizeof(text), "LOCKER %u PIN",
                  (unsigned)selected_locker + 1);
   lcd1602Print(text);
@@ -118,11 +116,10 @@ static void lcdShowEntry(void)
   for (uint8_t i = 0; i < entered_length; i++) lcd1602Print("*");
 }
 
-static void clearEntry(bool deselect)
+static void clearEntry(void)
 {
   entered_length = 0;
   entered_password[0] = '\0';
-  if (deselect) selected_locker = LOCKER_COUNT;
   lcdShowEntry();
 }
 
@@ -148,45 +145,86 @@ static void lockLocker(uint8_t locker)
   lockServoLock(locker);
   piezoLock();
   sendEvent(locker, "LOCKED");
-  if (selected_locker == locker) clearEntry(true);
+  if (selected_locker == locker) clearEntry();
+}
+
+static void authFailure(const char *message)
+{
+  auth_pending = false;
+  piezoError();
+  lcd1602Clear();
+  lcd1602Print(message);
 }
 
 static void passwordSubmit(void)
 {
-  if (selected_locker >= LOCKER_COUNT || entered_length == 0) return;
-  if (strcmp(entered_password, locker_pin[selected_locker]) == 0)
+  if (selected_locker >= LOCKER_COUNT || entered_length == 0 || auth_pending) return;
+  if (entered_length < 4)
   {
-    uint8_t locker = selected_locker;
     entered_length = 0;
     entered_password[0] = '\0';
-    unlockLocker(locker, "PIN");
+    authFailure("PIN TOO SHORT");
+    return;
   }
-  else
+  char request[48];
+  unsigned request_id = auth_request_id + 1;
+  int length = snprintf(request, sizeof(request), "AUTH@%u@%s@%u",
+                        (unsigned)selected_locker + 1, entered_password,
+                        request_id);
+  if (length <= 0 || length >= (int)sizeof(request) ||
+      !sendRouted(IOT_DB_ID, request))
   {
-    piezoError();
-    sendEvent(selected_locker, "PIN:FAIL");
-    lcd1602Clear();
-    lcd1602Print("ACCESS DENIED");
-    HAL_Delay(700);
-    clearEntry(false);
+    entered_length = 0;
+    entered_password[0] = '\0';
+    authFailure("NETWORK ERROR");
+    return;
   }
+  auth_request_id = request_id;
+  auth_locker = selected_locker;
+  auth_started_at = HAL_GetTick();
+  auth_pending = true;
+  entered_length = 0;
+  entered_password[0] = '\0';
+  lcd1602Clear();
+  lcd1602Print("VERIFYING...");
+}
+
+static void processAuthReply(const char *reply)
+{
+  unsigned locker, request_id;
+  char extra;
+  bool approved = sscanf(reply, "AUTH_OK@%u@%u%c", &locker,
+                         &request_id, &extra) == 2;
+  if (!approved && sscanf(reply, "AUTH_FAIL@%u@%u%c", &locker,
+                          &request_id, &extra) != 2) return;
+  if (!auth_pending || locker != (unsigned)auth_locker + 1 ||
+      request_id != auth_request_id ||
+      HAL_GetTick() - auth_started_at >= AUTH_TIMEOUT_MS) return;
+  auth_pending = false;
+  if (approved) unlockLocker(auth_locker, "PIN");
+  else authFailure("ACCESS DENIED");
 }
 
 static void handleKey(char key)
 {
+  if (auth_pending) return;
   piezoKey();
-  if (key == '*')
+  /* A/C: 1번, B/D: 2번. 선택을 바꾸면 이전 PIN 입력은 지운다. */
+  if (key == 'A' || key == 'C')
   {
-    clearEntry(true);
+    selected_locker = 0;
+    clearEntry();
     return;
   }
-  if (selected_locker >= LOCKER_COUNT)
+  if (key == 'B' || key == 'D')
   {
-    if (key >= '1' && key < '1' + LOCKER_COUNT)
-    {
-      selected_locker = (uint8_t)(key - '1');
-      clearEntry(false);
-    }
+    selected_locker = LOCKER_COUNT - 1;
+    clearEntry();
+    return;
+  }
+  if (key == '*')
+  {
+    clearEntry();
     return;
   }
   if (key >= '0' && key <= '9' && entered_length < PASSWORD_MAX_LENGTH)
@@ -280,12 +318,29 @@ static void sendStatus(void)
   }
 }
 
-static void processHostCommand(const char *command)
+static void replyStatus(const char *target)
+{
+  if (target == NULL) return;
+  for (uint8_t locker = 0; locker < LOCKER_COUNT; locker++)
+  {
+    char payload[64];
+    (void)snprintf(payload, sizeof(payload), "STATUS@%u@%s@%s",
+                   (unsigned)locker + 1,
+                   door_open[locker] ? "OPEN" : "CLOSED",
+                   lockServoIsLocked(locker) ? "LOCKED" : "UNLOCKED");
+    sendRouted(target, payload);
+  }
+}
+
+static void processHostCommand(const char *command, const char *reply_to)
 {
   unsigned number;
   char extra;
   if (strcmp(command, "STATUS?") == 0)
+  {
     sendStatus();
+    replyStatus(reply_to);
+  }
   else if (strcmp(command, "BUZZER") == 0)
     piezoError();
   else if (sscanf(command, "UNLOCK@%u%c", &number, &extra) == 1 &&
@@ -317,10 +372,12 @@ static void processNetworkLine(char *line)
       hostSend("ESP:ID_ALREADY_ONLINE\r\n");
     return;
   }
-  if (strcmp(line + 1, IOT_ADMIN_ID) == 0)
-    processHostCommand(closing + 1);
+  if (strcmp(line + 1, IOT_DB_ID) == 0)
+    processAuthReply(closing + 1);
+  else if (strcmp(line + 1, IOT_ADMIN_ID) == 0)
+    processHostCommand(closing + 1, line + 1);
 #else
-  processHostCommand(line);
+  processHostCommand(line, NULL);
 #endif
 }
 
@@ -369,6 +426,9 @@ static void hostUpdate(void)
 #endif
   }
   while (esp01ReadLine(command, sizeof(command))) processNetworkLine(command);
+  if (auth_pending && (!network_seen ||
+      HAL_GetTick() - auth_started_at >= AUTH_TIMEOUT_MS))
+    authFailure("AUTH TIMEOUT");
 
   uint8_t byte;
   while (HAL_UART_Receive(&huart2, &byte, 1, 0) == HAL_OK)
@@ -378,7 +438,7 @@ static void hostUpdate(void)
       if (usb_length > 0)
       {
         usb_line[usb_length] = '\0';
-        processHostCommand(usb_line);
+        processHostCommand(usb_line, NULL);
         usb_length = 0;
       }
     }
@@ -403,7 +463,7 @@ void apInit(void)
     door_open[locker] = door_raw[locker] = doorSensorIsOpen(locker);
     door_change_at[locker] = HAL_GetTick();
   }
-  clearEntry(true);
+  clearEntry();
   hostSend("SYSTEM:READY\r\n");
   sendStatus();
 }

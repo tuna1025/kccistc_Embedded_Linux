@@ -6,9 +6,9 @@
 #include "project_local.h"
 #endif
 
-/* 현재 실제 배선은 1칸. 2칸째 핀을 CubeMX에서 설정한 뒤 2로 변경한다. */
+/* 1번: PC0/PA6, 2번: PC1/PA7. */
 #ifndef LOCKER_COUNT
-#define LOCKER_COUNT 1
+#define LOCKER_COUNT 2
 #endif
 
 /* 조명은 배선 후 1로 변경한다. 현재는 ADC/LED 제어를 실행하지 않는다. */
@@ -21,13 +21,7 @@
 #define TTP229_DEBUG 0
 #endif
 
-/* 시연용 로컬 비밀번호. 실제 서비스 인증 방식은 별도로 결정한다. */
-#ifndef LOCKER_1_PIN
-#define LOCKER_1_PIN "1234"
-#endif
-#ifndef LOCKER_2_PIN
-#define LOCKER_2_PIN "5678"
-#endif
+/* 키패드 비밀번호는 라즈베리파이 DB에서 검증한다. */
 
 /* 4핀 자기 센서 DO: 자석이 문 닫힘 위치에 오면 HIGH.
  * 실제 모듈이 반대로 출력하면 project_local.h에서 GPIO_PIN_RESET으로 덮어쓴다. */
